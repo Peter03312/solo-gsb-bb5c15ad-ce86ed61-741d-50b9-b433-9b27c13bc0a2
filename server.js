@@ -1096,8 +1096,10 @@ function hostLabelText(hostKind, hostId, ctx) {
   return `回路 #${id}${ctx ? `（${ctx.circuitName(id)}）` : ''}`;
 }
 
-// 单条冲突原因的中文说明（name_collision / reference_missing / 依附关系区分抉择侧）
+// 单条冲突原因的中文说明（name_collision / reference_missing / 依附关系区分抉择侧；
+// side 为 null 表示「非某一侧取值的问题，而是两侧取值组合才会触发」，如交叉改名撞名）
 function describeReason(kind, id, r, ctx) {
+  if (!r || !r.code) return '该项需逐项抉择（冲突原因未标注）';
   const sideText = r.side === 'draft' ? '保留草稿侧' : '采用待合入版本侧';
   switch (r.code) {
     case 'both_modified':
@@ -1106,9 +1108,24 @@ function describeReason(kind, id, r, ctx) {
       return '一侧删除而另一侧做了修改（删除与修改并存）';
     case 'same_key_diff':
       return '同编号新增但两侧内容不同';
-    case 'name_collision':
-      return `若${sideText}，名称「${r.detail.name}」与同表另一项重名（${kind === 'light' ? '灯具' : '回路'}名称须唯一）`;
+    case 'name_collision': {
+      const what = kind === 'light' ? '灯具' : '回路';
+      if (r.side === 'draft' || r.side === 'incoming') {
+        return `若${sideText}，名称「${r.detail.name}」与同表另一项重名（${what}名称须唯一）`;
+      }
+      // 跨侧组合撞名：两侧各自保留改动（自然合入）时同名，须至少为其中一项改选另一侧
+      const others = (r.detail?.others || []).map((x) => `${what} #${x}`).join('、');
+      return `两侧改动撞名：各自保留改动时本项与 ${others || '同表另一项'} 同名「${r.detail.name}」` +
+        `（${what}名称须唯一），须至少为其中一项改选另一侧`;
+    }
     case 'reference_missing':
+      if (r.side !== 'draft' && r.side !== 'incoming') {
+        // 跨侧组合导致引用缺失（含提交时的最终结果校验）
+        if (kind === 'cue') {
+          return `合并结果中 Cue #${id} 引用的灯具 #${r.detail.missing_light_id} 不存在（两侧取值组合所致），请调整抉择使引用闭合`;
+        }
+        return `合并结果中灯具 #${id} 的接线引用了不存在的回路 #${r.detail.missing_circuit_id}（两侧取值组合所致），请调整抉择使引用闭合`;
+      }
       if (kind === 'cue') {
         return `若${sideText}，Cue #${id} 引用的灯具 #${r.detail.missing_light_id} 在合并结果中不存在`;
       }
@@ -1215,8 +1232,10 @@ function presentConflict(c, ctx) {
     status: c.status,
     attached: !!c.attached,
     title: entryTitle(c),
-    reason: c.reason,
-    reason_text: describeReason(c.kind, c.id, c.reasons[0], ctx),
+    reason: c.reason || 'needs_choice',
+    reason_text: c.reasons.length > 0
+      ? describeReason(c.kind, c.id, c.reasons[0], ctx)
+      : '该项需逐项抉择（冲突原因未标注）',
     reasons: c.reasons.map((r) => ({
       code: r.code,
       side: r.side || null,

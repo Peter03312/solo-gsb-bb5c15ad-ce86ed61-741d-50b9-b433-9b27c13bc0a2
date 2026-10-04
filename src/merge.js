@@ -281,12 +281,26 @@ function classify(base, draft, incoming) {
   // 两遍投影校验：
   // 第 1 遍只强制结构性冲突，找出规则类冲突（重名/引用缺失）涉及的编号；
   // 第 2 遍把这些编号也按侧强制，才能准确标注「选某一侧时是否违规」。
+  // 第 1 遍的违规本身也要留存（naturalViolations）：交叉改名这类撞名
+  // （草稿把灯具甲改名为「聚光」、待合入把灯具乙也改名为「聚光」）只在
+  // 「各取自然结果」的跨侧组合下出现——第 2 遍把全部冲突强制到同一侧后，
+  // 任一侧投影各自自洽、违规消失；若只留第 2 遍结果，条目会被列为冲突
+  // 却丢失原因。此类缘由以 side=null 标注（非某一侧的问题，而是两侧
+  // 取值组合所致）。
   const projViolations = { draft: new Map(), incoming: new Map() };
+  const naturalViolations = new Map(); // key -> [{code, detail}]（按 code+detail 去重）
   for (const side of ['draft', 'incoming']) {
     const p1 = project(maps, side, conflictKeys);
     const v1 = validateResult(p1.light, p1.circuit, p1.cue, p1.wiring);
-    for (const key of v1.keys()) {
+    for (const [key, list] of v1) {
       if (!conflictKeys.has(key)) conflictKeys.add(key);
+      for (const v of list) {
+        if (!naturalViolations.has(key)) naturalViolations.set(key, []);
+        const arr = naturalViolations.get(key);
+        if (!arr.some((x) => x.code === v.code && sameValue(x.detail, v.detail))) {
+          arr.push(v);
+        }
+      }
     }
   }
   for (const side of ['draft', 'incoming']) {
@@ -398,6 +412,12 @@ function classify(base, draft, incoming) {
           reasons.push({ code: v.code, side, detail: v.detail });
         }
       }
+      // 跨侧组合型违规（第 1 遍自然投影）：未被任一单侧投影覆盖时补充，
+      // 否则交叉改名撞名的条目会被列为冲突却没有任何可读缘由
+      for (const v of naturalViolations.get(e.key) || []) {
+        const covered = reasons.some((r) => r.code === v.code && sameValue(r.detail, v.detail));
+        if (!covered) reasons.push({ code: v.code, side: null, detail: v.detail });
+      }
       for (const v of extraReasons.get(e.key) || []) reasons.push(v);
 
       // 依附降级条目：在原因中说明依附关系（结构性冲突条目只带依附边，不改主原因）
@@ -437,8 +457,9 @@ function classify(base, draft, incoming) {
           reason: reasons[0]?.code || e.reason,
           reasons,
           edges: e.edges,
-          // 本身无结构性冲突、纯因依附主体而进入冲突列表 → 未显式抉择时可跟随主体
-          attached: e.status !== 'conflict',
+          // 纯依附降级项（自身无结构性冲突、仅因依附边进入冲突列表）才可跟随主体
+          // 同进同退；规则类冲突（重名/引用缺失）没有可跟随的主体，必须逐项显式抉择
+          attached: e.status !== 'conflict' && e.edges.length > 0,
           base: e.base,
           draft: e.draft,
           incoming: e.incoming,

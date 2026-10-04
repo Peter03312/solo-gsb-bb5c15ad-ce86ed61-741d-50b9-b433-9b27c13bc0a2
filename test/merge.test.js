@@ -189,6 +189,84 @@ test('名称重名：待合入新增灯与草稿保留灯同名，冲突随两�
   assert.ok(ri.violations.some((v) => v.code === 'name_collision'));
 });
 
+test('灯具交叉改名撞名：草稿改甲、待合入改乙为同一名 → 冲突带可读缘由，逐项可抉择', () => {
+  const base = baseSnapshot(); // 灯1=面光1、灯2=侧光L
+  const draft = clone(base);
+  draft.lights[0].name = '聚光'; // 草稿把灯1 改名「聚光」
+  const incoming = clone(base);
+  incoming.lights[1].name = '聚光'; // 待合入把灯2 也改名「聚光」
+
+  const cls = Merge.classify(base, draft, incoming);
+  // 两盏灯都列为冲突，且缘由不丢失：跨侧组合撞名（side=null）
+  for (const key of ['light:1', 'light:2']) {
+    const c = findConflict(cls, key);
+    assert.ok(c, `${key} 必须列为冲突`);
+    assert.equal(c.reason, 'name_collision');
+    assert.ok(
+      c.reasons.some((r) => r.code === 'name_collision' && r.side === null && r.detail.name === '聚光'),
+      `${key} 须带跨侧组合撞名缘由`
+    );
+    // 规则类冲突没有可跟随的主体，不是依附项（页面须逐项显式抉择）
+    assert.equal(c.attached, false);
+  }
+
+  // 名称唯一的组合可落定：灯1 取草稿（聚光）、灯2 取草稿（侧光L 不改名）
+  const ok = Merge.resolve(base, draft, incoming, { 'light:1': 'draft', 'light:2': 'draft' });
+  assert.equal(ok.ok, true, JSON.stringify(ok.violations));
+  const byId = Object.fromEntries(ok.final.lights.map((l) => [l.id, l.name]));
+  assert.deepEqual(byId, { 1: '聚光', 2: '侧光L' });
+
+  // 另一组唯一组合：灯1 取待合入（面光1 不改名）、灯2 取待合入（聚光）
+  const ok2 = Merge.resolve(base, draft, incoming, { 'light:1': 'incoming', 'light:2': 'incoming' });
+  assert.equal(ok2.ok, true);
+  const byId2 = Object.fromEntries(ok2.final.lights.map((l) => [l.id, l.name]));
+  assert.deepEqual(byId2, { 1: '面光1', 2: '聚光' });
+
+  // 撞名组合（各取改动侧）→ 整次拒绝
+  const dup = Merge.resolve(base, draft, incoming, { 'light:1': 'draft', 'light:2': 'incoming' });
+  assert.equal(dup.ok, false);
+  assert.ok(dup.violations.some((v) => v.code === 'name_collision'));
+
+  // 未完成抉择 → 明确报出未解决项
+  const un = Merge.resolve(base, draft, incoming, {});
+  assert.equal(un.ok, false);
+  assert.deepEqual(un.unresolved.sort(), ['light:1', 'light:2']);
+  const part = Merge.resolve(base, draft, incoming, { 'light:1': 'draft' });
+  assert.equal(part.ok, false);
+  assert.deepEqual(part.unresolved, ['light:2']);
+});
+
+test('回路交叉改名撞名：草稿改回路甲、待合入改回路乙为同一名 → 同样列为冲突并可抉择', () => {
+  const base = baseSnapshot();
+  base.circuits.push({ id: 2, name: '侧光回路', capacity: 1000 });
+  base.wiring[1] = { light_id: 2, circuit_id: 2, watts: 200 };
+  const draft = clone(base);
+  draft.circuits[0].name = '主回路'; // 草稿把回路1 改名「主回路」
+  const incoming = clone(base);
+  incoming.circuits[1].name = '主回路'; // 待合入把回路2 也改名「主回路」
+
+  const cls = Merge.classify(base, draft, incoming);
+  for (const key of ['circuit:1', 'circuit:2']) {
+    const c = findConflict(cls, key);
+    assert.ok(c, `${key} 必须列为冲突`);
+    assert.equal(c.reason, 'name_collision');
+    assert.ok(c.reasons.some((r) => r.code === 'name_collision' && r.side === null));
+    assert.equal(c.attached, false);
+  }
+
+  // 各取草稿侧：回路1=主回路、回路2=侧光回路 → 唯一，通过；接线按编号不变
+  const ok = Merge.resolve(base, draft, incoming, { 'circuit:1': 'draft', 'circuit:2': 'draft' });
+  assert.equal(ok.ok, true, JSON.stringify(ok.violations));
+  const names = Object.fromEntries(ok.final.circuits.map((c) => [c.id, c.name]));
+  assert.deepEqual(names, { 1: '主回路', 2: '侧光回路' });
+  assert.equal(ok.final.wiring.find((w) => w.light_id === 2).circuit_id, 2);
+
+  // 撞名组合 → 整次拒绝
+  const dup = Merge.resolve(base, draft, incoming, { 'circuit:1': 'draft', 'circuit:2': 'incoming' });
+  assert.equal(dup.ok, false);
+  assert.ok(dup.violations.some((v) => v.code === 'name_collision'));
+});
+
 test('Cue 引用缺失灯具：一侧删灯另一侧保留其 Cue 且改过 → 冲突', () => {
   const base = baseSnapshot();
   const draft = clone(base);

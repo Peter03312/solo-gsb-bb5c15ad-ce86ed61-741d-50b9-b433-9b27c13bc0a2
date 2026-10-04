@@ -2265,6 +2265,13 @@ function renderMergePreview() {
             </div>
           </label>`
           : '';
+        // 跨侧组合警示（side 为 null：两侧取值组合才会触发，如交叉改名撞名）；
+        // 首条缘由已在标题行展示，这里列出其余组合型缘由
+        const comboWarns = c.reasons
+          .slice(1)
+          .filter((r) => r.side === null)
+          .map((r) => `<li class="danger-text">⚠ ${esc(r.text)}</li>`)
+          .join('');
         return `
         <div class="merge-conflict" data-conflict-index="${idx}" data-attached="${c.attached ? '1' : '0'}">
           <div class="merge-conflict-head">
@@ -2272,6 +2279,7 @@ function renderMergePreview() {
             ${c.attached ? '<span class="badge waiting">依附项</span>' : ''}
             <span class="muted">${esc(c.reason_text)}</span>
           </div>
+          ${comboWarns ? `<ul class="merge-warns">${comboWarns}</ul>` : ''}
           <div class="merge-conflict-cols">
             ${followChoice}
             <label class="merge-choice ${c.draft === null ? 'is-deleted' : ''}">

@@ -530,6 +530,8 @@ npm test                  # 运行灯光渐变引擎单元测试
 8. **版本合并**：在「版本合并」页选择共同基线版本与另一组发布的待合入版本，点击三方比较预览：
    页面分区列出**可自动合入的单侧改动**与**冲突**；每条冲突用单选选择「保留草稿」或
    「采用待合入版本」（会导致重名或引用缺失的一侧有红色警示；联动冲突需与引用方同侧）。
+   草稿与待合入版本把**不同**灯具/回路改成**同一名称**（交叉改名）时，相关两项都会列为冲突
+   并展示撞名缘由，逐项选择使最终名称唯一即可落定；撞名组合或漏选会被明确拒绝且草稿不变。
    提交后以一次事务更新草稿；若预览后草稿被改过会提示重新预览。已发布版本与调光记录不变。
 9. **共享房间**：在「共享房间」页选择已发布版本，可勾选「启用回路超载保护」后创建房间，
    页面显示**房间码**与**控制密钥**
@@ -901,7 +903,7 @@ curl -X POST http://localhost:3000/api/merge/preview \
 | `both_modified` | 两侧不同修改 |
 | `delete_vs_modify` | 删除与修改并存 |
 | `same_key_diff` | 同编号新增异值 |
-| `name_collision` | 该侧取值会造成灯具/回路名称重名（`reasons[].side` 标明是哪一侧） |
+| `name_collision` | 该侧取值会造成灯具/回路名称重名（`reasons[].side` 标明是哪一侧；`side` 为 `null` 表示跨侧组合撞名——两侧各自保留改动才同名，须至少为其中一项改选另一侧） |
 | `reference_missing` | 该侧取值下 Cue 引用的灯具、或接线引用的回路缺失 |
 | `reference_dependency` | 联动冲突：Cue/接线需要本灯具/回路，须与引用方同侧 |
 | `attached_to_conflict` | 依附同编号新增主体的新增 Cue / 改投接线，须与主体同进同退（详情在 `attachments`） |
@@ -996,6 +998,63 @@ curl -X POST http://localhost:3000/api/merge/commit \
 若抉择后的**最终**结果仍重名（例如把与现有灯同名的新增灯也选入），或某条 Cue/接线最终仍指向
 已删除的灯具/回路，提交依旧返回 `400` 整次拒绝、不写入；改用合法抉择后可凭**同一令牌**重试
 （令牌仅在成功提交、预览后草稿变动 409、或令牌过期/缺失时作废）。
+
+### 交叉改名撞名（草稿与待合入把不同灯具/回路改成同一名称）
+
+两组从同一基线各自改稿时，可能出现**交叉改名**：草稿把灯具甲改名为「聚光」，待合入版本却把
+**另一盏**灯具乙也改名为「聚光」。每一侧各自都合法，但「各自保留改动」的自然合入结果会出现
+两盏同名灯。回路同理（草稿改回路甲、待合入改回路乙为同一名）。
+
+- **预览**：`POST /api/merge/preview` 把两盏灯（或两条回路）都列为冲突，返回令牌、两侧取值
+  与可读缘由。缘由代码为 `name_collision` 且 `reasons[].side` 为 **`null`**——表示这不是
+  「选某一侧就违规」，而是**两侧取值组合**才会撞名；`reason_text` 形如
+  `两侧改动撞名：各自保留改动时本项与 灯具 #2 同名「聚光」（灯具名称须唯一），须至少为其中一项改选另一侧`。
+  此类冲突 `attached: false`（没有可跟随的主体），页面只提供「保留草稿 / 采用待合入版本」
+  两个选项，排演人员逐项选择。
+- **提交**：`POST /api/merge/commit` 凭 `token` 与逐项 `resolutions` 一次事务落定。
+  - 所选结果**名称唯一**（如 `light:1=draft`、`light:2=draft`：灯 1 改名「聚光」、灯 2 不采用
+    待合入改名）→ `200`，草稿更新，已发布版本快照不变，令牌作废（一次性）；
+  - **撞名组合**（`light:1=draft` 且 `light:2=incoming`，两盏都叫「聚光」）→ `400`，
+    响应带 `violations`（含中文说明），**草稿不变**，令牌未作废、可更正后重试；
+  - **未完成抉择**（漏选任一项）→ `400`，响应带 `unresolved` 列出未选择项，草稿不变；
+  - 预览后草稿被编辑 → `409` 且令牌作废，须重新预览。
+
+```bash
+# 场景：基线版本 1 中灯具 #1=甲、#2=乙；当前草稿把 #1 改名「聚光」；
+#       待合入版本 2 把 #2 也改名「聚光」。
+# 1) 预览（只读）：两项冲突均带 name_collision 缘由与两侧取值
+curl -X POST http://localhost:3000/api/merge/preview \
+  -H 'Content-Type: application/json' \
+  -d '{"base_version_id":1,"incoming_version_id":2}'
+# → summary.conflicts_total = 2
+#   conflicts[0]: {"key":"light:1","reason":"name_collision","attached":false,
+#     "reason_text":"两侧改动撞名：各自保留改动时本项与 灯具 #2 同名「聚光」（灯具名称须唯一），须至少为其中一项改选另一侧",
+#     "reasons":[{"code":"name_collision","side":null,"text":"…同上…"}],
+#     "draft":{"id":1,"name":"聚光"},"incoming":{"id":1,"name":"甲"}}
+#   conflicts[1]: {"key":"light:2", … "draft":{"id":2,"name":"乙"},"incoming":{"id":2,"name":"聚光"}}
+
+# 2a) 名称唯一的组合：灯 #1 保留草稿改名、灯 #2 不采用待合入改名 → 200 一次事务落定
+curl -X POST http://localhost:3000/api/merge/commit \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"<预览返回的 token>","resolutions":{"light:1":"draft","light:2":"draft"}}'
+# → {"merged":true, "draft":{"lights":[{"id":1,"name":"聚光",…},{"id":2,"name":"乙",…}], …}}
+
+# 2b) 撞名组合：两盏灯都叫「聚光」→ 400 整次拒绝，草稿不变，令牌可更正后重试
+curl -X POST http://localhost:3000/api/merge/commit \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"<预览返回的 token>","resolutions":{"light:1":"draft","light:2":"incoming"}}'
+# → 400 {"error":"合并结果仍违反唯一性或引用规则，整次提交已拒绝：…",
+#        "violations":[{"key":"light:1","code":"name_collision","text":"…"}, …]}
+
+# 2c) 未完成抉择：漏选 light:2 → 400 并列出未解决项，草稿不变
+curl -X POST http://localhost:3000/api/merge/commit \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"<预览返回的 token>","resolutions":{"light:1":"draft"}}'
+# → 400 {"error":"仍有 1 个冲突未做选择，请逐项选择…","unresolved":["light:2"]}
+```
+
+页面上，「版本合并」页的冲突卡片会在标题行展示撞名缘由（其余组合型缘由列在卡片内警示区），
+两个选项分别展示草稿侧与待合入侧的名称，逐项选择后提交即可。
 
 ### 同编号新增灯具/回路：新增 Cue 与改投接线的依附抉择
 

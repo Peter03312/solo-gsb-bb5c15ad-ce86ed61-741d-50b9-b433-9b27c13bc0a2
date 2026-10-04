@@ -238,6 +238,57 @@ function project(maps, side, forcedKeys) {
   return out;
 }
 
+// 自然合入投影：结构性冲突条目暂不取值（视为未定/缺失），其余条目（含因规则
+// 提升的编号）按自然结果落定。用于发现只在「两侧改动混合落定」时才出现的
+// 违规（典型：交叉重名）。
+function projectNatural(maps, structuralKeys) {
+  const out = {
+    light: new Map(),
+    circuit: new Map(),
+    cue: new Map(),
+    wiring: new Map(),
+  };
+  for (const kind of KINDS) {
+    for (const e of maps[kind]) {
+      if (structuralKeys.has(e.key)) continue;
+      const v = naturalOutcome(e.status, e.base, e.draft, e.incoming);
+      if (v !== null && v !== undefined) {
+        const id = kind === 'cue' ? v.cue_no : kind === 'wiring' ? v.light_id : v.id;
+        out[kind].set(id, v);
+      }
+    }
+  }
+  return out;
+}
+
+// 「侧候选」投影：结构性冲突条目取其在指定侧的显式取值（该侧删除则缺席），
+// 其余条目按自然结果落定。用于发现交叉重名组中含结构性冲突条目的情形：
+// 例如 #1 两侧不同修改（草稿改名 X）、#2 待合入单侧改名 X——自然投影漏掉
+// #1，但「草稿侧候选 + 自然结果」中 #1=X、#2=X 同名，#2 必须列为冲突。
+function projectSideCandidates(maps, structuralKeys, side) {
+  const out = {
+    light: new Map(),
+    circuit: new Map(),
+    cue: new Map(),
+    wiring: new Map(),
+  };
+  for (const kind of KINDS) {
+    for (const e of maps[kind]) {
+      let v;
+      if (structuralKeys.has(e.key)) {
+        v = sideOutcome(side, e.draft, e.incoming);
+      } else {
+        v = naturalOutcome(e.status, e.base, e.draft, e.incoming);
+      }
+      if (v !== null && v !== undefined) {
+        const id = kind === 'cue' ? v.cue_no : kind === 'wiring' ? v.light_id : v.id;
+        out[kind].set(id, v);
+      }
+    }
+  }
+  return out;
+}
+
 /* ------------------------------- 主分类入口 ------------------------------- */
 
 function classify(base, draft, incoming) {
@@ -273,25 +324,127 @@ function classify(base, draft, incoming) {
   }
 
   // 结构性冲突（两侧不同改动 / 删除与修改并存 / 同编号新增异值）
+  const structuralKeys = new Set();
   const conflictKeys = new Set();
   for (const kind of KINDS) {
-    for (const e of maps[kind]) if (e.status === 'conflict') conflictKeys.add(e.key);
-  }
-
-  // 两遍投影校验：
-  // 第 1 遍只强制结构性冲突，找出规则类冲突（重名/引用缺失）涉及的编号；
-  // 第 2 遍把这些编号也按侧强制，才能准确标注「选某一侧时是否违规」。
-  const projViolations = { draft: new Map(), incoming: new Map() };
-  for (const side of ['draft', 'incoming']) {
-    const p1 = project(maps, side, conflictKeys);
-    const v1 = validateResult(p1.light, p1.circuit, p1.cue, p1.wiring);
-    for (const key of v1.keys()) {
-      if (!conflictKeys.has(key)) conflictKeys.add(key);
+    for (const e of maps[kind]) {
+      if (e.status === 'conflict') {
+        structuralKeys.add(e.key);
+        conflictKeys.add(e.key);
+      }
     }
   }
+
+  // 投影校验：
+  //   「自然合入结果」= 结构性冲突条目暂不取值（缺失），其余条目按单侧改动落定。
+  //   - 单侧投影（迭代至不动点）：把当前冲突集合内的条目强制取某一侧，其余按
+  //     自然结果，找出该侧选择下的规则违规（重名/引用缺失），把涉及编号提升进
+  //     冲突集合；不动点后再出一遍最终违规，标注「选某一侧时是否违规」。
+  //   - 交叉重名组（结构性集合恒定，一次性算出）：自然投影 + 两侧「侧候选」投影
+  //     （结构性冲突条目取其该侧候选值，其余按自然结果）中的同名组。前者覆盖
+  //     双方都不是结构性冲突的纯交叉（草稿把灯 #1 改名 X、待合入把灯 #2 也改名
+  //     X）；后者覆盖同名组中一方本身是两侧不同修改的情形，取该侧候选时与自然
+  //     结果撞名。单侧投影本就同名的组按普通 name_collision 呈现，不计入交叉组。
+  //   最终冲突成员按「实际证据」重建（结构性 / 单侧违规 / 纯交叉重名 / 引用联动
+  //   / 依附边），避免提升后证据消失的编号带着空缘由残留（空缘由会让预览无法
+  //   呈现缘由与选项，曾直接导致预览 500）。
+  const projViolations = { draft: new Map(), incoming: new Map() };
+
+  // 交叉重名组（仅由结构性集合决定，恒定）：`${kind}:${name}` -> { kind, name, ids }
+  const crossNameGroups = new Map();
+  const collectNameGroups = (lightMap, circuitMap) => {
+    const groups = [];
+    const scan = (map, kind) => {
+      const byName = new Map();
+      for (const [id, v] of map) {
+        if (!byName.has(v.name)) byName.set(v.name, []);
+        byName.get(v.name).push(id);
+      }
+      for (const [name, ids0] of byName) {
+        if (ids0.length > 1) groups.push({ kind, name, ids: ids0.sort((a, b) => a - b) });
+      }
+    };
+    scan(lightMap, 'light');
+    scan(circuitMap, 'circuit');
+    return groups;
+  };
+  const pNatural0 = projectNatural(maps, structuralKeys);
+  // seedSide: null=自然投影（纯交叉）；'draft'/'incoming'=该侧候选投影（组内含
+  // 结构性冲突条目，仅在选择该侧时成立）。同名组一旦在自然投影中出现即为纯交叉，
+  // 侧候选不得再把它降级成侧别组。
+  const seedCrossGroups = (mapLights, mapCircuits, seedSide) => {
+    for (const g of collectNameGroups(mapLights, mapCircuits)) {
+      const gKey = `${g.kind}:${g.name}`;
+      const prev = crossNameGroups.get(gKey);
+      const effectiveSide = prev && prev.seedSide === null ? null : seedSide;
+      if (!prev || prev.seedSide !== effectiveSide || prev.ids.length !== g.ids.length) {
+        crossNameGroups.set(gKey, { ...g, seedSide: effectiveSide });
+      }
+      for (const id of g.ids) conflictKeys.add(keyOf(g.kind, id));
+    }
+  };
+  // 自然投影 + 两侧「侧候选」投影中的同名组都收集：
+  //   - 自然投影：交叉重名双方都不是结构性冲突（本轮主诉场景）；
+  //   - 侧候选投影：同名组中一方是结构性冲突，取其该侧候选值时与自然结果撞名。
+  seedCrossGroups(pNatural0.light, pNatural0.circuit, null);
   for (const side of ['draft', 'incoming']) {
-    const p2 = project(maps, side, conflictKeys);
-    projViolations[side] = validateResult(p2.light, p2.circuit, p2.cue, p2.wiring);
+    const pSideCand = projectSideCandidates(maps, structuralKeys, side);
+    seedCrossGroups(pSideCand.light, pSideCand.circuit, side);
+  }
+
+  // 单侧违规提升至不动点
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const side of ['draft', 'incoming']) {
+      const pSide = project(maps, side, conflictKeys);
+      const vSide = validateResult(pSide.light, pSide.circuit, pSide.cue, pSide.wiring);
+      for (const key of vSide.keys()) {
+        if (!conflictKeys.has(key)) {
+          conflictKeys.add(key);
+          grew = true;
+        }
+      }
+    }
+  }
+
+  // 不动点后的最终各侧违规
+  for (const side of ['draft', 'incoming']) {
+    const p = project(maps, side, conflictKeys);
+    projViolations[side] = validateResult(p.light, p.circuit, p.cue, p.wiring);
+  }
+  // 最终交叉重名组：重新由三个投影合并（结构性集合恒定，组保持稳定），
+  // 并剔除「单侧投影下本就同名」的组——那种情况按普通 name_collision
+  // （带侧别警示）呈现即可，不属于交叉重名。
+  crossNameGroups.clear();
+  {
+    const mergeGroups = (mapLights, mapCircuits, seedSide) => {
+      for (const g of collectNameGroups(mapLights, mapCircuits)) {
+        const gKey = `${g.kind}:${g.name}`;
+        const prev = crossNameGroups.get(gKey);
+        const effectiveSide = prev && prev.seedSide === null ? null : seedSide;
+        if (!prev || prev.seedSide !== effectiveSide || prev.ids.length !== g.ids.length) {
+          crossNameGroups.set(gKey, { ...g, seedSide: effectiveSide });
+        }
+      }
+    };
+    const pNat = projectNatural(maps, structuralKeys);
+    mergeGroups(pNat.light, pNat.circuit, null);
+    for (const side of ['draft', 'incoming']) {
+      const pCand = projectSideCandidates(maps, structuralKeys, side);
+      mergeGroups(pCand.light, pCand.circuit, side);
+    }
+    for (const [gKey, g] of [...crossNameGroups]) {
+      // 只按「组成立的那一侧」的最终单侧违规判断是否已被侧别重名覆盖
+      const sides = g.seedSide ? [g.seedSide] : ['draft', 'incoming'];
+      const coveredBySide = g.ids.some((id) => {
+        const k = keyOf(g.kind, id);
+        return sides.some((side) =>
+          (projViolations[side].get(k) || []).some((v) => v.code === 'name_collision')
+        );
+      });
+      if (coveredBySide) crossNameGroups.delete(gKey);
+    }
   }
 
   // 引用耦合：某条 Cue/接线在某一侧需要某灯具/回路，而该灯具/回路在另一侧被删除
@@ -342,6 +495,7 @@ function classify(base, draft, incoming) {
    * 带依附边的非冲突条目降级为冲突（不再进 auto），跟随主体同侧抉择；
    * 本身已是结构性冲突的条目只附上依附边，供逐项抉择时做同侧一致性校验。
    */
+  const edgePromotedKeys = new Set();
   function refsOf(kind, e, side) {
     const v = side === 'draft' ? e.draft : e.incoming;
     if (v === null) return [];
@@ -377,8 +531,13 @@ function classify(base, draft, incoming) {
   for (const kind of ['cue', 'wiring']) {
     for (const e of maps[kind]) {
       e.edges = bindingEdges(kind, e);
-      // 带依附边的非冲突条目：从 auto 降级为冲突，显式跟随主体同侧
-      if (e.edges.length > 0 && !conflictKeys.has(e.key)) conflictKeys.add(e.key);
+      // 带依附边的非冲突条目：从 auto 降级为冲突，显式跟随主体同侧。
+      // 记录在 edgePromotedKeys 中——只有这类条目才是可「跟随主体」的纯依附项；
+      // 因重名/引用规则提升的灯具/回路不是依附项，必须逐项显式抉择。
+      if (e.edges.length > 0 && !conflictKeys.has(e.key)) {
+        conflictKeys.add(e.key);
+        edgePromotedKeys.add(e.key);
+      }
     }
   }
   // 灯具/回路不引用其他实体，不建边
@@ -389,6 +548,12 @@ function classify(base, draft, incoming) {
   const auto = [];
   const conflicts = [];
 
+  // 先为每个条目汇总「实际缘由证据」，再据此重建最终冲突集合：
+  // 结构性冲突 / 单侧规则违规 / 引用联动 / 纯交叉重名 / 依附降级，五者居一即为冲突。
+  // 不能直接沿用迭代用的 conflictKeys：其中可能残留提升后证据已消失的编号
+  // （缘由为空会让预览崩溃且无法逐项选择）。
+  const entryReasons = new Map();
+  const reasonKeys = new Set();
   for (const kind of KINDS) {
     for (const e of maps[kind]) {
       const reasons = [];
@@ -400,8 +565,29 @@ function classify(base, draft, incoming) {
       }
       for (const v of extraReasons.get(e.key) || []) reasons.push(v);
 
+      // 交叉重名：不同编号的改名在合并结果中撞名（任一侧单独看均不重名）。
+      // seedSide=null 时不归属任何抉择侧：两侧各自改名本身都合法，只有「交叉
+      // 组合」才重名；seedSide 标明该组仅在结构性冲突条目取该侧候选时成立。
+      // 结构性冲突条目的主缘由已由结构性原因解释，这里只为组内「非结构性」成员
+      // 追加交叉缘由（否则该成员会留在 auto，撞上未定侧主体的某种选择）。
+      if ((kind === 'light' || kind === 'circuit') && e.status !== 'conflict') {
+        const group = [...crossNameGroups.values()].find(
+          (g) => g.kind === kind && g.ids.includes(e.id)
+        );
+        if (group) {
+          reasons.push({
+            code: 'cross_name_collision',
+            side: group.seedSide,
+            detail: {
+              name: group.name,
+              others: group.ids.filter((x) => x !== e.id),
+            },
+          });
+        }
+      }
+
       // 依附降级条目：在原因中说明依附关系（结构性冲突条目只带依附边，不改主原因）
-      if (conflictKeys.has(e.key) && e.status !== 'conflict' && e.edges.length > 0) {
+      if (edgePromotedKeys.has(e.key)) {
         const hosts = [];
         for (const side of ['draft', 'incoming']) {
           for (const ed of e.edges.filter((x) => x.side === side)) {
@@ -427,7 +613,18 @@ function classify(base, draft, incoming) {
         });
       }
 
-      if (conflictKeys.has(e.key)) {
+      entryReasons.set(e.key, reasons);
+      if (e.status === 'conflict' || reasons.length > 0 || edgePromotedKeys.has(e.key)) {
+        reasonKeys.add(e.key);
+      }
+    }
+  }
+
+  for (const kind of KINDS) {
+    for (const e of maps[kind]) {
+      const reasons = entryReasons.get(e.key) || [];
+
+      if (reasonKeys.has(e.key)) {
         conflicts.push({
           kind,
           key: e.key,
@@ -437,8 +634,9 @@ function classify(base, draft, incoming) {
           reason: reasons[0]?.code || e.reason,
           reasons,
           edges: e.edges,
-          // 本身无结构性冲突、纯因依附主体而进入冲突列表 → 未显式抉择时可跟随主体
-          attached: e.status !== 'conflict',
+          // 只有纯因依附同编号新增主体而降级的条目才可「跟随主体」；
+          // 交叉重名等规则提升的灯具/回路必须逐项显式抉择。
+          attached: edgePromotedKeys.has(e.key),
           base: e.base,
           draft: e.draft,
           incoming: e.incoming,
@@ -483,7 +681,9 @@ function classify(base, draft, incoming) {
     conflicts_total: conflicts.length,
   };
 
-  return { auto, conflicts, conflictKeys, summary, maps, entryByKey };
+  // 返回给 resolve 的冲突集合以「实际证据」重建后的为准（不含提升后证据
+  // 消失、缘由为空的残留编号）
+  return { auto, conflicts, conflictKeys: reasonKeys, summary, maps, entryByKey };
 }
 
 /* ------------------------------ 抉择落地与校验 ------------------------------ */
@@ -644,7 +844,15 @@ function resolve(base, draft, incoming, resolutions = {}) {
     }
     const vv = validateResult(out.light, out.circuit, out.cue, out.wiring);
     for (const [key, list] of vv) {
-      for (const v of list) violations.push({ key, code: v.code, detail: v.detail });
+      for (const v of list) {
+        violations.push({
+          key,
+          code: v.code,
+          // 该项最终取了哪一侧（交叉重名组合中两侧都被选入时，据此提示）
+          side: choice.get(key) || null,
+          detail: v.detail,
+        });
+      }
     }
   }
 

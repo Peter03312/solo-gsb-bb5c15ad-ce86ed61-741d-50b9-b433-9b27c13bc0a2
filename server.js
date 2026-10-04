@@ -1098,7 +1098,7 @@ function hostLabelText(hostKind, hostId, ctx) {
 
 // 单条冲突原因的中文说明（name_collision / reference_missing / 依附关系区分抉择侧）
 function describeReason(kind, id, r, ctx) {
-  const sideText = r.side === 'draft' ? '保留草稿侧' : '采用待合入版本侧';
+  const sideText = r.side === 'draft' ? '保留草稿侧' : r.side === 'incoming' ? '采用待合入版本侧' : '当前合并结果';
   switch (r.code) {
     case 'both_modified':
       return '两侧相对共同基线做了不同修改';
@@ -1108,6 +1108,18 @@ function describeReason(kind, id, r, ctx) {
       return '同编号新增但两侧内容不同';
     case 'name_collision':
       return `若${sideText}，名称「${r.detail.name}」与同表另一项重名（${kind === 'light' ? '灯具' : '回路'}名称须唯一）`;
+    case 'cross_name_collision': {
+      const unit = kind === 'light' ? '灯具' : '回路';
+      const others = (r.detail.others || []).map((x) => `${unit} #${x}`).join('、');
+      if (r.side === 'draft' || r.side === 'incoming') {
+        const sideName = r.side === 'draft' ? '保留草稿侧' : '采用待合入版本侧';
+        return `交叉重名：若冲突主体${sideName}名称「${r.detail.name}」，而 ${others} 的合入结果` +
+          `也叫「${r.detail.name}」，二者将重名（${unit}名称须唯一）；请逐项选择，最终仍重名的组合提交时整次拒绝`;
+      }
+      return `交叉重名：草稿与待合入版本分别把不同${unit}改名为「${r.detail.name}」` +
+        `（本项与 ${others}），两侧的改动单独看都合法，但自然合入后名称重复。` +
+        '请逐项选择「保留草稿」或「采用待合入版本」；若最终仍有两项同名，提交将被整次拒绝';
+    }
     case 'reference_missing':
       if (kind === 'cue') {
         return `若${sideText}，Cue #${id} 引用的灯具 #${r.detail.missing_light_id} 在合并结果中不存在`;
@@ -1156,7 +1168,7 @@ function describeReason(kind, id, r, ctx) {
 
 function describeViolation(v, ctx) {
   const { kind, id } = Merge.parseKey(v.key);
-  return describeReason(kind, id, { code: v.code, detail: v.detail }, ctx);
+  return describeReason(kind, id, { code: v.code, side: v.side || null, detail: v.detail }, ctx);
 }
 
 function presentAuto(e, ctx) {
@@ -1208,6 +1220,11 @@ function presentConflict(c, ctx) {
       (c.attached ? '（可交给系统跟随主体同侧）' : '（本项另有冲突，请与此处选择保持同侧，否则整次拒绝）');
   };
 
+  // 兜底：冲突条目理论上必带缘由；若出现空缘由（防御性），给出中性说明而非 500
+  const firstReason =
+    c.reasons[0] ||
+    ({ code: c.reason || 'conflict', side: null, text: '该项与待合入版本存在冲突，请逐项选择后提交' });
+
   return {
     kind: c.kind,
     key: c.key,
@@ -1215,8 +1232,8 @@ function presentConflict(c, ctx) {
     status: c.status,
     attached: !!c.attached,
     title: entryTitle(c),
-    reason: c.reason,
-    reason_text: describeReason(c.kind, c.id, c.reasons[0], ctx),
+    reason: firstReason.code,
+    reason_text: describeReason(c.kind, c.id, firstReason, ctx),
     reasons: c.reasons.map((r) => ({
       code: r.code,
       side: r.side || null,
@@ -1342,6 +1359,7 @@ app.post('/api/merge/commit', (req, res) => {
       body.violations = result.violations.map((v) => ({
         key: v.key,
         code: v.code,
+        side: v.side || null,
         detail: v.detail,
         text: describeViolation(v, vctx),
       }));

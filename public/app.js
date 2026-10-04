@@ -2247,6 +2247,16 @@ function renderMergePreview() {
             .filter((r) => r.side === side)
             .map((r) => `<li class="danger-text">⚠ ${esc(r.text)}</li>`)
             .join('');
+        // 不归属任何一侧的共性缘由（如交叉重名 cross_name_collision）：
+        // 两侧单独看都合法，须逐项选择、由最终组合判定
+        const commonReasons = c.reasons.filter(
+          (r) => r.side === null && r.code !== 'attached_to_conflict'
+        );
+        const commonWarns = commonReasons.length
+          ? `<ul class="merge-warns merge-warns-common">${commonReasons
+              .map((r) => `<li class="danger-text">⚠ ${esc(r.text)}</li>`)
+              .join('')}</ul>`
+          : '';
         // 依附关系提示：本项取该侧时随哪些冲突主体同进同退
         const binding = (side) => {
           const note = c.binding_note && c.binding_note[side];
@@ -2272,6 +2282,7 @@ function renderMergePreview() {
             ${c.attached ? '<span class="badge waiting">依附项</span>' : ''}
             <span class="muted">${esc(c.reason_text)}</span>
           </div>
+          ${commonWarns}
           <div class="merge-conflict-cols">
             ${followChoice}
             <label class="merge-choice ${c.draft === null ? 'is-deleted' : ''}">

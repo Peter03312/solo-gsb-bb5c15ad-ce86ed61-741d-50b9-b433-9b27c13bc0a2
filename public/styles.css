@@ -229,6 +229,7 @@ tr.cmp-hot td { color: var(--amber-soft); }
 .merge-choice input { margin-top: .25rem; }
 .merge-choice-label { font-weight: 600; color: var(--amber-soft); margin-bottom: .25rem; }
 .merge-warns { margin: .3rem 0 0; padding-left: 1.1rem; font-size: .8rem; }
+.merge-warns-common { margin: 0 0 .6rem; padding-left: 1.1rem; font-size: .82rem; }
 
 /* ------------------------------- 共享房间 ------------------------------ */
 .room-created {
